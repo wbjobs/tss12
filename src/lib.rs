@@ -12,9 +12,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use types::{Molecule, CalculationOutput, EigenResult};
-use huckel::{build_hamiltonian, build_overlap_matrix, compute_electron_density};
-use eigen_cpu::solve_eigen_jacobi;
+use types::{Molecule, CalculationOutput, EigenResult, Algorithm, auto_select_algorithm, total_ehmo_basis_size};
+use huckel::{build_hamiltonian, build_overlap_matrix, build_ehmo_hamiltonian, build_ehmo_overlap, compute_electron_density};
+use eigen_cpu::{solve_eigen_jacobi, solve_generalized_eigen};
 use eigen_gpu::GPUEigenSolver;
 use svg_gen::generate_energy_level_svg;
 use output::{write_density_binary, density_to_base64, molecule_to_json};
@@ -24,16 +24,23 @@ use html_template::get_html_template;
 pub struct HuckelEngine {
     use_gpu: bool,
     gpu_solver: Option<GPUEigenSolver>,
+    force_algorithm: Option<Algorithm>,
 }
 
 #[pymethods]
 impl HuckelEngine {
     #[new]
-    #[pyo3(signature = (use_gpu=true))]
-    fn new(use_gpu: bool) -> Self {
+    #[pyo3(signature = (use_gpu=true, force_algorithm=None))]
+    fn new(use_gpu: bool, force_algorithm: Option<&str>) -> Self {
+        let algo = force_algorithm.and_then(|s| match s.to_lowercase().as_str() {
+            "simple" | "simplehuckel" | "huckel" => Some(Algorithm::SimpleHuckel),
+            "extended" | "ehmo" | "extendedhuckel" => Some(Algorithm::ExtendedHuckel),
+            _ => None,
+        });
         Self {
             use_gpu,
             gpu_solver: None,
+            force_algorithm: algo,
         }
     }
 
@@ -69,40 +76,136 @@ impl HuckelEngine {
         let mol: Molecule = serde_json::from_str(mol_json)
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse molecule JSON: {}", e)))?;
 
-        let n = mol.num_atoms();
-        let num_electrons = mol.num_pi_electrons();
-        println!("  Atoms:        {}", n);
-        println!("  π-electrons:  {}", num_electrons);
+        let algorithm = self.force_algorithm.unwrap_or_else(|| auto_select_algorithm(&mol));
+        let algo_str = match algorithm {
+            Algorithm::SimpleHuckel => "Simple Hückel (π-electron)",
+            Algorithm::ExtendedHuckel => "Extended Hückel (EHMO, full-valence)",
+        };
+        println!("  Algorithm:    {}", algo_str);
+
+        let (n, num_electrons) = match algorithm {
+            Algorithm::SimpleHuckel => {
+                let n_ = mol.num_atoms();
+                let ne = mol.num_pi_electrons();
+                (n_, ne)
+            }
+            Algorithm::ExtendedHuckel => {
+                let total = total_ehmo_basis_size(&mol);
+                let ne = mol.total_valence_electrons();
+                println!("  Basis size:   {} functions (s+p+d)", total);
+                println!("  Valence e-:   {} (full shell)", ne);
+                (total, ne)
+            }
+        };
+
+        let atom_count = mol.atoms.len();
+        println!("  Atoms:        {}", atom_count);
         println!("  Charge:       {:?}", mol.charge.unwrap_or(0));
 
         let _ = self.initialize_gpu(py);
 
-        println!("\n[Step 1] Building Hamiltonian matrix...");
+        println!("\n[Step 1] Building matrices (H, S)...");
         let t0 = Instant::now();
-        let h = build_hamiltonian(&mol);
-        let s = build_overlap_matrix(&mol);
+        let (h, s) = match algorithm {
+            Algorithm::SimpleHuckel => {
+                let hh = build_hamiltonian(&mol);
+                let ss = build_overlap_matrix(&mol);
+                (hh, ss)
+            }
+            Algorithm::ExtendedHuckel => {
+                let hh = build_ehmo_hamiltonian(&mol);
+                let ss = build_ehmo_overlap(&mol);
+                (hh, ss)
+            }
+        };
         println!("  Matrix size: {}x{} ({:.2} MB)",
                  n, n, (n * n * 8) as f64 / (1024.0 * 1024.0));
         println!("  Completed in {:.2?}", t0.elapsed());
 
-        println!("\n[Step 2] Solving eigenvalue problem Hc = εSc...");
+        println!("\n[Step 2] Solving eigenvalue problem...");
         let t1 = Instant::now();
 
-        let num_eigen = (num_electrons / 2 + 10).max(n.min(50));
-
-        let result: EigenResult = if let Some(ref gpu) = self.gpu_solver {
-            if n > 200 {
-                println!("  Using GPU (Lanczos method) for {} eigenpairs", num_eigen);
-                py.allow_threads(|| gpu.solve_eigen(&h, Some(num_eigen)))
-            } else {
-                println!("  Using CPU (Jacobi method) for small matrix");
-                py.allow_threads(|| solve_eigen_jacobi(&h, 500, 1e-10))
-            }
+        let num_eigen = if let Algorithm::ExtendedHuckel = algorithm {
+            (num_electrons / 2 + 15).min(n)
         } else {
-            println!("  Using CPU (Jacobi method)");
-            py.allow_threads(|| solve_eigen_jacobi(&h, 500, 1e-10))
+            (num_electrons / 2 + 10).max(n.min(50))
         };
 
+        let problem_type = match algorithm {
+            Algorithm::SimpleHuckel => "Hc = εSc (standard)",
+            Algorithm::ExtendedHuckel => "Hc = εSc (generalized, S-overlap)",
+        };
+        println!("  Problem: {}", problem_type);
+
+        let result: EigenResult = match algorithm {
+            Algorithm::SimpleHuckel => {
+                if let Some(ref gpu) = self.gpu_solver {
+                    if n > 200 {
+                        println!("  Using GPU (Lanczos method) for {} eigenpairs", num_eigen);
+                        py.allow_threads(|| gpu.solve_eigen(&h, None, Some(num_eigen)))
+                    } else {
+                        println!("  Using CPU (Jacobi method) for small matrix");
+                        py.allow_threads(|| solve_eigen_jacobi(&h, 1000, 1e-10))
+                    }
+                } else {
+                    println!("  Using CPU (Jacobi method)");
+                    py.allow_threads(|| solve_eigen_jacobi(&h, 1000, 1e-10))
+                }
+            }
+            Algorithm::ExtendedHuckel => {
+                if let Some(ref _gpu) = self.gpu_solver {
+                    if n <= 300 {
+                        println!("  Using CPU generalized eigensolver (Cholesky + Jacobi)");
+                    } else {
+                        println!("  Large EHMO system, falling back to CPU generalized solver for stability");
+                    }
+                } else {
+                    println!("  Using CPU generalized eigensolver (Cholesky + Jacobi)");
+                }
+                py.allow_threads(|| solve_generalized_eigen(&h, &s, 2000, 1e-10))
+            }
+        };
+
+        let imag_check = result.eigenvalues.iter().any(|e| !e.is_finite());
+        if imag_check {
+            eprintln!("  [WARN] Non-finite eigenvalues detected! Re-solving with stricter parameters.");
+            let retry_result = match algorithm {
+                Algorithm::SimpleHuckel => solve_eigen_jacobi(&h, 3000, 1e-12),
+                Algorithm::ExtendedHuckel => solve_generalized_eigen(&h, &s, 4000, 1e-12),
+            };
+            drop(result);
+            return self.finalize_calculation(py, &mol, retry_result, algorithm,
+                n, num_electrons, grid_resolution, grid_padding, output_dir);
+        }
+
+        self.finalize_calculation(py, &mol, result, algorithm,
+            n, num_electrons, grid_resolution, grid_padding, output_dir)
+    }
+
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!(
+            "HuckelEngine(use_gpu={}, gpu_initialized={}, force_algorithm={:?})",
+            self.use_gpu,
+            self.gpu_solver.is_some(),
+            self.force_algorithm
+        ))
+    }
+}
+
+impl HuckelEngine {
+    fn finalize_calculation<'py>(
+        &self,
+        py: Python<'py>,
+        mol: &Molecule,
+        result: EigenResult,
+        algorithm: Algorithm,
+        _n: usize,
+        num_electrons: usize,
+        grid_resolution: usize,
+        grid_padding: f64,
+        output_dir: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let t1 = Instant::now();
         println!("  Found {} eigenvalues", result.eigenvalues.len());
         println!("  Completed in {:.2?}", t1.elapsed());
 
@@ -148,14 +251,20 @@ impl HuckelEngine {
         println!("  Memory estimate: {:.2} MB", (total_voxels * 4) as f64 / (1024.0 * 1024.0));
 
         let density = py.allow_threads(|| compute_electron_density(
-            &mol,
+            mol,
             &result.eigenvectors,
             num_electrons,
             grid_origin,
             grid_dims,
             grid_spacing,
+            algorithm,
         ));
         println!("  Completed in {:.2?}", t2.elapsed());
+
+        let algo_name = match algorithm {
+            Algorithm::SimpleHuckel => "SimpleHuckel",
+            Algorithm::ExtendedHuckel => "ExtendedHuckel",
+        }.to_string();
 
         let calc_output = CalculationOutput {
             eigenvalues: result.eigenvalues.clone(),
@@ -165,6 +274,7 @@ impl HuckelEngine {
             grid_origin,
             grid_spacing,
             num_electrons,
+            algorithm: algo_name.clone(),
         };
 
         if let Some(dir) = output_dir {
@@ -176,19 +286,19 @@ impl HuckelEngine {
             let svg_path = path.join("energy_levels.svg");
             let svg = generate_energy_level_svg(&result.eigenvalues, num_electrons, 900, 700);
             fs::write(&svg_path, &svg).ok();
-            println!("  ✓ SVG energy level diagram: {}", svg_path.display());
+            println!("  [OK] SVG energy level diagram: {}", svg_path.display());
 
             let bin_path = path.join("electron_density.bin");
             write_density_binary(&calc_output, bin_path.to_str().unwrap())
                 .map_err(|e| PyRuntimeError::new_err(format!("Write binary failed: {}", e)))?;
-            println!("  ✓ Binary density data:      {}", bin_path.display());
+            println!("  [OK] Binary density data:      {}", bin_path.display());
 
-            let mol_json_str = molecule_to_json(&mol, &calc_output);
+            let mol_json_str = molecule_to_json(mol, &calc_output);
             let density_b64 = density_to_base64(&calc_output);
             let html = get_html_template(&mol_json_str, &density_b64, &svg);
             let html_path = path.join("visualization.html");
             fs::write(&html_path, html).ok();
-            println!("  ✓ HTML 3D visualization:    {}", html_path.display());
+            println!("  [OK] HTML 3D visualization:    {}", html_path.display());
 
             println!("  Completed in {:.2?}", t3.elapsed());
         }
@@ -197,25 +307,19 @@ impl HuckelEngine {
         println!("║          Calculation Complete!               ║");
         println!("╚══════════════════════════════════════════════╝");
 
+        let atom_count = mol.atoms.len();
         Python::with_gil(|py| {
             let dict = pyo3::types::PyDict::new(py);
             dict.set_item("eigenvalues", &result.eigenvalues)?;
             dict.set_item("homo_lumo_gap", gap)?;
-            dict.set_item("num_atoms", n)?;
+            dict.set_item("num_atoms", atom_count)?;
             dict.set_item("num_electrons", num_electrons)?;
             dict.set_item("grid_dims", grid_dims.to_vec())?;
             dict.set_item("grid_origin", grid_origin.to_vec())?;
             dict.set_item("grid_spacing", grid_spacing)?;
+            dict.set_item("algorithm", algo_name)?;
             Ok(dict.to_object(py))
         })
-    }
-
-    fn __repr__(&self) -> PyResult<String> {
-        Ok(format!(
-            "HuckelEngine(use_gpu={}, gpu_initialized={})",
-            self.use_gpu,
-            self.gpu_solver.is_some()
-        ))
     }
 }
 
@@ -227,16 +331,29 @@ fn load_molecule_json(path: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (mol_json, output_dir, use_gpu=true, grid_resolution=50, grid_padding=3.0, force_algorithm=None))]
 fn run_calculation(
     mol_json: &str,
     output_dir: &str,
     use_gpu: bool,
     grid_resolution: usize,
     grid_padding: f64,
+    force_algorithm: Option<&str>,
 ) -> PyResult<PyObject> {
     Python::with_gil(|py| {
-        let mut engine = HuckelEngine::new(use_gpu);
+        let mut engine = HuckelEngine::new(use_gpu, force_algorithm);
         engine.calculate(py, mol_json, Some(output_dir), grid_resolution, grid_padding)
+    })
+}
+
+#[pyfunction]
+fn detect_algorithm(mol_json: &str) -> PyResult<String> {
+    let mol: Molecule = serde_json::from_str(mol_json)
+        .map_err(|e| PyRuntimeError::new_err(format!("Parse error: {}", e)))?;
+    let algo = auto_select_algorithm(&mol);
+    Ok(match algo {
+        Algorithm::SimpleHuckel => "SimpleHuckel".to_string(),
+        Algorithm::ExtendedHuckel => "ExtendedHuckel".to_string(),
     })
 }
 
@@ -245,5 +362,6 @@ fn huckel_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<HuckelEngine>()?;
     m.add_function(wrap_pyfunction!(load_molecule_json, m)?)?;
     m.add_function(wrap_pyfunction!(run_calculation, m)?)?;
+    m.add_function(wrap_pyfunction!(detect_algorithm, m)?)?;
     Ok(())
 }

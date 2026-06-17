@@ -1,8 +1,8 @@
 struct Params {
     n: u32,
-    k: u32,
-    iter: u32,
-    padding: u32,
+    matrix_len: u32,
+    x_len: u32,
+    y_len: u32,
 }
 
 @group(0) @binding(0)
@@ -21,13 +21,21 @@ var<storage, read_write> vector_y: array<f32>;
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i: u32 = gid.x;
     let n: u32 = params.n;
+    let mlen: u32 = params.matrix_len;
+    let xlen: u32 = params.x_len;
+    let ylen: u32 = params.y_len;
 
-    if (i >= n) {
+    if (i >= n || i >= ylen) {
         return;
     }
 
     var sum: f32 = 0.0;
-    let row_base: u32 = i * n;
+    var row_base: u32 = i * n;
+
+    if (row_base >= mlen && n > 0u) {
+        vector_y[i] = 0.0;
+        return;
+    }
 
     var j: u32 = 0u;
     loop {
@@ -44,13 +52,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 break;
             }
             let idx: u32 = j + jj;
-            block_sum = block_sum + matrix_a[row_base + idx] * vector_x[idx];
+            let mat_idx: u32 = row_base + idx;
+
+            if (mat_idx < mlen && idx < xlen) {
+                let a: f32 = matrix_a[mat_idx];
+                let x: f32 = vector_x[idx];
+                if (isFinite(a) && isFinite(x)) {
+                    block_sum = block_sum + a * x;
+                }
+            }
+
             jj = jj + 1u;
         }
-        sum = sum + block_sum;
+        if (isFinite(block_sum)) {
+            sum = sum + block_sum;
+        }
 
         j = j + block;
     }
 
-    vector_y[i] = sum;
+    if (!isFinite(sum)) {
+        sum = 0.0;
+    }
+
+    if (i < ylen) {
+        vector_y[i] = sum;
+    }
 }

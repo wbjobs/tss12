@@ -1,0 +1,17 @@
+{
+  "name": "Platinum(IV) tetrachloride (PtCl4, square planar)",
+  "charge": 0,
+  "atoms": [
+    {"element": "Pt", "x":  0.000, "y":  0.000, "z": 0.000},
+    {"element": "Cl", "x":  2.300, "y":  0.000, "z": 0.000},
+    {"element": "Cl", "x": -2.300, "y":  0.000, "z": 0.000},
+    {"element": "Cl", "x":  0.000, "y":  2.300, "z": 0.000},
+    {"element": "Cl", "x":  0.000, "y": -2.300, "z": 0.000}
+  ],
+  "bonds": [
+    {"atom1": 0, "atom2": 1, "bond_order": 1.0},
+    {"atom1": 0, "atom2": 2, "bond_order": 1.0},
+    {"atom1": 0, "atom2": 3, "bond_order": 1.0},
+    {"atom1": 0, "atom2": 4, "bond_order": 1.0}
+  ]
+}

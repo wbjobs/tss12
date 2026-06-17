@@ -1,0 +1,33 @@
+{
+  "name": "Au13 Icosahedral Cluster (magic-number gold nanocluster)",
+  "charge": 0,
+  "atoms": [
+    {"element": "Au", "x":  0.000000, "y":  0.000000, "z":  0.000000},
+    {"element": "Au", "x":  2.800000, "y":  0.000000, "z":  0.000000},
+    {"element": "Au", "x": -2.800000, "y":  0.000000, "z":  0.000000},
+    {"element": "Au", "x":  0.000000, "y":  2.800000, "z":  0.000000},
+    {"element": "Au", "x":  0.000000, "y": -2.800000, "z":  0.000000},
+    {"element": "Au", "x":  0.000000, "y":  0.000000, "z":  2.800000},
+    {"element": "Au", "x":  0.000000, "y":  0.000000, "z": -2.800000},
+    {"element": "Au", "x":  1.869772, "y":  1.869772, "z":  1.869772},
+    {"element": "Au", "x":  1.869772, "y":  1.869772, "z": -1.869772},
+    {"element": "Au", "x":  1.869772, "y": -1.869772, "z":  1.869772},
+    {"element": "Au", "x":  1.869772, "y": -1.869772, "z": -1.869772},
+    {"element": "Au", "x": -1.869772, "y":  1.869772, "z":  1.869772},
+    {"element": "Au", "x": -1.869772, "y":  1.869772, "z": -1.869772}
+  ],
+  "bonds": [
+    {"atom1": 0,  "atom2": 1,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 2,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 3,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 4,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 5,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 6,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 7,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 8,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 9,  "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 10, "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 11, "bond_order": 1.0},
+    {"atom1": 0,  "atom2": 12, "bond_order": 1.0}
+  ]
+}

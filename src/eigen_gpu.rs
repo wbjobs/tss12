@@ -1,4 +1,5 @@
-use crate::types::EigenResult;
+use crate::types::{EigenResult, Algorithm};
+use crate::eigen_cpu::{symmetrize, sanitize_matrix, regularize_positive_definite, solve_generalized_eigen, solve_eigen_jacobi};
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 use std::time::Instant;
@@ -7,9 +8,9 @@ use std::time::Instant;
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct GPUParams {
     n: u32,
-    k: u32,
-    iter: u32,
-    padding: u32,
+    matrix_len: u32,
+    x_len: u32,
+    y_len: u32,
 }
 
 pub struct GPUEigenSolver {
@@ -57,8 +58,7 @@ impl GPUEigenSolver {
                 source: wgpu::ShaderSource::Wgsl(shader_src.into()),
             });
 
-        let pipeline = self
-            .device
+        self.device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("Eigen Pipeline"),
                 layout: None,
@@ -66,24 +66,35 @@ impl GPUEigenSolver {
                 entry_point,
                 compilation_options: Default::default(),
                 cache: None,
-            });
-        pipeline
+            })
     }
 
     pub fn solve_eigen(
         &self,
         matrix: &Vec<Vec<f64>>,
+        overlap: Option<&Vec<Vec<f64>>>,
         num_eigen: Option<usize>,
     ) -> EigenResult {
         let n = matrix.len();
-        let k = num_eigen.unwrap_or(n.min(100)).min(n);
 
-        if n <= 200 {
-            return crate::eigen_cpu::solve_eigen_jacobi(matrix, 500, 1e-10);
+        if let Some(s) = overlap {
+            if n <= 300 {
+                return solve_generalized_eigen(matrix, s, 2000, 1e-10);
+            }
+            println!("[GPU] Generalized eigenvalue problem (>300) falling back to CPU for stability");
+            return solve_generalized_eigen(matrix, s, 2000, 1e-10);
+        }
+
+        let k = num_eigen.unwrap_or(n.min(120)).min(n);
+        if n <= 250 {
+            return solve_eigen_jacobi(matrix, 1000, 1e-10);
         }
 
         pollster::block_on(self.solve_eigen_gpu(matrix, n, k))
-            .unwrap_or_else(|_| crate::eigen_cpu::solve_eigen_jacobi(matrix, 500, 1e-10))
+            .unwrap_or_else(|e| {
+                eprintln!("[GPU] Failed ({}), falling back to CPU", e);
+                solve_eigen_jacobi(matrix, 1000, 1e-10)
+            })
     }
 
     async fn solve_eigen_gpu(
@@ -92,44 +103,47 @@ impl GPUEigenSolver {
         n: usize,
         k: usize,
     ) -> Result<EigenResult, String> {
-        println!("[GPU] Running Lanczos eigensolver for {}x{} matrix, requesting {} eigenpairs", n, n, k);
+        println!("[GPU] Lanczos eigensolver: {}x{} matrix, requesting {} eigenpairs", n, n, k);
         let start = Instant::now();
 
-        let mut a_flat: Vec<f32> = matrix.iter().flatten().map(|&x| x as f32).collect();
-        self.lanczos_normalize(&mut a_flat, n)?;
+        let mut m_clone = matrix.clone();
+        sanitize_matrix(&mut m_clone);
+        symmetrize(&mut m_clone);
 
-        let (eigenvalues, eigenvectors) = self.lanczos_iteration(&a_flat, n, k).await?;
-
-        println!("[GPU] Eigensolver completed in {:.2?}", start.elapsed());
-
-        let mut sorted_pairs: Vec<(f64, Vec<f64>)> = eigenvalues
-            .into_iter()
-            .zip(eigenvectors.into_iter())
-            .collect();
-        sorted_pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        Ok(EigenResult {
-            eigenvalues: sorted_pairs.iter().map(|x| x.0).collect(),
-            eigenvectors: sorted_pairs.into_iter().map(|x| x.1).collect(),
-        })
-    }
-
-    fn lanczos_normalize(&self, a: &mut Vec<f32>, n: usize) -> Result<(), String> {
+        let mut a_flat: Vec<f32> = Vec::with_capacity(n * n);
         let mut max_val = 0.0f32;
-        for &val in a.iter() {
-            max_val = max_val.max(val.abs());
-        }
-        if max_val > 0.0 {
-            for val in a.iter_mut() {
-                *val /= max_val;
+        for row in &m_clone {
+            for &val in row {
+                let v = val as f32;
+                if v.abs() > max_val { max_val = v.abs(); }
+                a_flat.push(v);
             }
         }
-        let trace: f32 = (0..n).map(|i| a[i * n + i]).sum();
+        if max_val < 1e-20 { max_val = 1.0; }
+        let inv_max = 1.0 / max_val;
+        for v in &mut a_flat { *v *= inv_max; }
+        let trace: f32 = (0..n).map(|i| a_flat[i * n + i]).sum();
         let avg = trace / n as f32;
-        for i in 0..n {
-            a[i * n + i] -= avg;
-        }
-        Ok(())
+        for i in 0..n { a_flat[i * n + i] -= avg; }
+
+        let actual_matrix_len = a_flat.len() as u32;
+        let (eigenvalues, eigenvectors) = self.lanczos_iteration(&a_flat, n, k, actual_matrix_len).await?;
+
+        let mut ev_scaled: Vec<f64> = eigenvalues.iter().map(|&e| e as f64 * max_val as f64 + avg as f64).collect();
+
+        println!("[GPU] Eigensolver done in {:.2?}", start.elapsed());
+
+        let mut pairs: Vec<(f64, Vec<f64>)> = ev_scaled
+            .drain(..)
+            .zip(eigenvectors.into_iter())
+            .collect();
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        Ok(EigenResult {
+            eigenvalues: pairs.iter().map(|x| x.0).collect(),
+            eigenvectors: pairs.into_iter().map(|x| x.1).collect(),
+            algorithm: Algorithm::SimpleHuckel,
+        })
     }
 
     async fn lanczos_iteration(
@@ -137,11 +151,12 @@ impl GPUEigenSolver {
         a_flat: &Vec<f32>,
         n: usize,
         k: usize,
+        actual_matrix_len: u32,
     ) -> Result<(Vec<f64>, Vec<Vec<f64>>), String> {
-        let m = (k * 3).min(n).max(k + 10);
-        println!("[GPU] Lanczos: using {} iterations for {} eigenvalues", m, k);
+        let m = (k * 3).min(n).max(k + 20);
+        println!("[GPU] Lanczos: {} iterations for {} eigenvalues", m, k);
 
-        let mut v = vec![vec![0.0f32; n]; m + 1];
+        let mut v: Vec<Vec<f32>> = vec![vec![0.0f32; n]; m + 1];
         let mut alpha = vec![0.0f32; m];
         let mut beta = vec![0.0f32; m];
 
@@ -150,12 +165,15 @@ impl GPUEigenSolver {
         }
 
         for j in 1..=m {
-            let w = self.gpu_mat_vec(a_flat, &v[j - 1], n).await?;
+            let w = self.gpu_mat_vec_safe(a_flat, &v[j - 1], n, actual_matrix_len).await
+                .unwrap_or_else(|_| self.cpu_mat_vec(a_flat, &v[j - 1], n));
 
             let mut w_vec = w;
+            if w_vec.len() != n { w_vec.resize(n, 0.0); }
             if j > 1 {
                 for i in 0..n {
-                    w_vec[i] -= beta[j - 2] * v[j - 2][i];
+                    let b = if j - 2 < beta.len() { beta[j - 2] } else { 0.0 };
+                    w_vec[i] -= b * v[j - 2][i];
                 }
             }
 
@@ -163,27 +181,50 @@ impl GPUEigenSolver {
             for i in 0..n {
                 aj += v[j - 1][i] * w_vec[i];
             }
-            alpha[j - 1] = aj;
-
-            for i in 0..n {
-                w_vec[i] -= aj * v[j - 1][i];
-            }
+            if j - 1 < alpha.len() { alpha[j - 1] = aj; }
+            for i in 0..n { w_vec[i] -= aj * v[j - 1][i]; }
 
             if j < m {
                 let bj2: f32 = w_vec.iter().map(|x| x * x).sum();
                 let bj = bj2.sqrt();
                 beta[j - 1] = bj;
                 if bj < 1e-12 {
-                    return self.reorthogonalize_and_extract(&v, &alpha, &beta, j, k, n);
+                    return self.extract_ritz(&v, &alpha, &beta, j.min(m), k, n);
                 }
-                let inv_bj = 1.0 / bj;
-                for i in 0..n {
-                    v[j][i] = w_vec[i] * inv_bj;
-                }
+                let inv = 1.0 / bj;
+                for i in 0..n { v[j][i] = w_vec[i] * inv; }
             }
         }
+        self.extract_ritz(&v, &alpha, &beta, m, k, n)
+    }
 
-        self.reorthogonalize_and_extract(&v, &alpha, &beta, m, k, n)
+    fn cpu_mat_vec(&self, a: &Vec<f32>, x: &Vec<f32>, n: usize) -> Vec<f32> {
+        let mut y = vec![0.0f32; n];
+        for i in 0..n {
+            let mut sum = 0.0f32;
+            let rb = i * n;
+            for j in 0..n {
+                if rb + j < a.len() && j < x.len() {
+                    sum += a[rb + j] * x[j];
+                }
+            }
+            y[i] = if sum.is_finite() { sum } else { 0.0 };
+        }
+        y
+    }
+
+    async fn gpu_mat_vec_safe(
+        &self,
+        a: &Vec<f32>,
+        x: &Vec<f32>,
+        n: usize,
+        actual_matrix_len: u32,
+    ) -> Result<Vec<f32>, String> {
+        if n < 256 || actual_matrix_len != (n * n) as u32 {
+            return Ok(self.cpu_mat_vec(a, x, n));
+        }
+        self.gpu_mat_vec(a, x, n, actual_matrix_len).await
+            .map_err(|e| format!("GPU matvec: {}", e))
     }
 
     async fn gpu_mat_vec(
@@ -191,21 +232,14 @@ impl GPUEigenSolver {
         a: &Vec<f32>,
         x: &Vec<f32>,
         n: usize,
+        actual_matrix_len: u32,
     ) -> Result<Vec<f32>, String> {
-        if n < 128 {
-            let mut y = vec![0.0f32; n];
-            for i in 0..n {
-                let mut sum = 0.0f32;
-                for j in 0..n {
-                    sum += a[i * n + j] * x[j];
-                }
-                y[i] = sum;
-            }
-            return Ok(y);
-        }
-
         let shader_src = include_str!("shaders/matvec.wgsl");
         let pipeline = self.create_compute_pipeline(shader_src, "main");
+
+        let a_len = a.len() as u32;
+        let x_len = x.len() as u32;
+        let y_len = n as u32;
 
         let a_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Matrix A"),
@@ -219,25 +253,26 @@ impl GPUEigenSolver {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
+        let y_bytes = (n * std::mem::size_of::<f32>()) as u64;
         let y_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Vector Y"),
-            size: (n * std::mem::size_of::<f32>()) as u64,
+            size: y_bytes,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let read_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Read Buffer"),
-            size: (n * std::mem::size_of::<f32>()) as u64,
+            size: y_bytes,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
         let params = GPUParams {
             n: n as u32,
-            k: 0,
-            iter: 0,
-            padding: 0,
+            matrix_len: a_len.min(actual_matrix_len),
+            x_len,
+            y_len,
         };
         let params_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Params"),
@@ -249,29 +284,16 @@ impl GPUEigenSolver {
             label: Some("MatVec Bind Group"),
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: a_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: x_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: y_buf.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: a_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: x_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: y_buf.as_entire_binding() },
             ],
         });
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("MatVec Encoder"),
         });
-
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("MatVec Pass"),
@@ -280,10 +302,9 @@ impl GPUEigenSolver {
             cpass.set_pipeline(&pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
             let workgroups = ((n as u32) + 255) / 256;
-            cpass.dispatch_workgroups(workgroups, 1, 1);
+            cpass.dispatch_workgroups(workgroups.max(1), 1, 1);
         }
-
-        encoder.copy_buffer_to_buffer(&y_buf, 0, &read_buf, 0, (n * std::mem::size_of::<f32>()) as u64);
+        encoder.copy_buffer_to_buffer(&y_buf, 0, &read_buf, 0, y_bytes);
         self.queue.submit(Some(encoder.finish()));
 
         let slice = read_buf.slice(..);
@@ -300,7 +321,7 @@ impl GPUEigenSolver {
         Ok(result)
     }
 
-    fn reorthogonalize_and_extract(
+    fn extract_ritz(
         &self,
         v: &Vec<Vec<f32>>,
         alpha: &Vec<f32>,
@@ -313,50 +334,37 @@ impl GPUEigenSolver {
         let mut t = vec![vec![0.0f64; m_actual]; m_actual];
         for i in 0..m_actual {
             t[i][i] = alpha[i] as f64;
-            if i + 1 < m_actual {
+            if i + 1 < m_actual && i + 1 < beta.len() {
                 t[i][i + 1] = beta[i] as f64;
                 t[i + 1][i] = beta[i] as f64;
             }
         }
 
-        let small_result = crate::eigen_cpu::solve_eigen_jacobi(&t, 1000, 1e-12);
+        let small = solve_eigen_jacobi(&t, 1500, 1e-12);
 
-        let num_extract = k.min(small_result.eigenvalues.len());
-        let mut ritz_vectors = vec![vec![0.0f64; n]; num_extract];
-
-        for eig_idx in 0..num_extract {
+        let num_extract = k.min(small.eigenvalues.len()).max(1);
+        let mut ritz = vec![vec![0.0f64; n]; num_extract];
+        for eig in 0..num_extract {
             for atom_idx in 0..n {
                 let mut sum = 0.0f64;
-                for lanczos_idx in 0..m_actual {
-                    if lanczos_idx < v.len() && atom_idx < v[lanczos_idx].len() {
-                        sum += v[lanczos_idx][atom_idx] as f64 * small_result.eigenvectors[eig_idx][lanczos_idx];
+                for li in 0..m_actual {
+                    if li < v.len() && atom_idx < v[li].len() && eig < small.eigenvectors.len() && li < small.eigenvectors[eig].len() {
+                        sum += v[li][atom_idx] as f64 * small.eigenvectors[eig][li];
                     }
                 }
-                ritz_vectors[eig_idx][atom_idx] = sum;
+                ritz[eig][atom_idx] = sum;
             }
-
-            let norm: f64 = ritz_vectors[eig_idx].iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm > 1e-15 {
-                let inv_norm = 1.0 / norm;
-                for val in ritz_vectors[eig_idx].iter_mut() {
-                    *val *= inv_norm;
-                }
+            let norm_sq: f64 = ritz[eig].iter().map(|x| x * x).sum();
+            if norm_sq > 1e-20 {
+                let inv = 1.0 / norm_sq.sqrt();
+                for val in ritz[eig].iter_mut() { *val *= inv; }
             }
         }
 
-        let mut eigenvalues: Vec<f64> = small_result.eigenvalues
-            .iter()
-            .take(num_extract)
-            .copied()
-            .collect();
+        let mut ev: Vec<f64> = small.eigenvalues.iter().take(num_extract).copied().collect();
+        while ev.len() < k { ev.push(0.0); }
+        while ritz.len() < k { ritz.push(vec![0.0f64; n]); }
 
-        while eigenvalues.len() < k {
-            eigenvalues.push(0.0);
-        }
-        while ritz_vectors.len() < k {
-            ritz_vectors.push(vec![0.0f64; n]);
-        }
-
-        Ok((eigenvalues, ritz_vectors))
+        Ok((ev, ritz))
     }
 }
