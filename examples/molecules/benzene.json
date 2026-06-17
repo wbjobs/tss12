@@ -1,0 +1,33 @@
+{
+  "name": "Benzene (C6H6)",
+  "charge": 0,
+  "multiplicity": 1,
+  "atoms": [
+    {"element": "C", "x":  1.39, "y":  0.00, "z": 0.00},
+    {"element": "C", "x":  0.695, "y":  1.204, "z": 0.00},
+    {"element": "C", "x": -0.695, "y":  1.204, "z": 0.00},
+    {"element": "C", "x": -1.39, "y":  0.00, "z": 0.00},
+    {"element": "C", "x": -0.695, "y": -1.204, "z": 0.00},
+    {"element": "C", "x":  0.695, "y": -1.204, "z": 0.00},
+    {"element": "H", "x":  2.47, "y":  0.00, "z": 0.00},
+    {"element": "H", "x":  1.235, "y":  2.140, "z": 0.00},
+    {"element": "H", "x": -1.235, "y":  2.140, "z": 0.00},
+    {"element": "H", "x": -2.47, "y":  0.00, "z": 0.00},
+    {"element": "H", "x": -1.235, "y": -2.140, "z": 0.00},
+    {"element": "H", "x":  1.235, "y": -2.140, "z": 0.00}
+  ],
+  "bonds": [
+    {"atom1": 0, "atom2": 1, "bond_order": 1.5},
+    {"atom1": 1, "atom2": 2, "bond_order": 1.5},
+    {"atom1": 2, "atom2": 3, "bond_order": 1.5},
+    {"atom1": 3, "atom2": 4, "bond_order": 1.5},
+    {"atom1": 4, "atom2": 5, "bond_order": 1.5},
+    {"atom1": 5, "atom2": 0, "bond_order": 1.5},
+    {"atom1": 0, "atom2": 6, "bond_order": 1.0},
+    {"atom1": 1, "atom2": 7, "bond_order": 1.0},
+    {"atom1": 2, "atom2": 8, "bond_order": 1.0},
+    {"atom1": 3, "atom2": 9, "bond_order": 1.0},
+    {"atom1": 4, "atom2": 10, "bond_order": 1.0},
+    {"atom1": 5, "atom2": 11, "bond_order": 1.0}
+  ]
+}
