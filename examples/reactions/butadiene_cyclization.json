@@ -1,0 +1,53 @@
+{
+  "reactant": {
+    "atoms": [
+      {"element": "C", "x": -1.300, "y":  0.000, "z":  0.000},
+      {"element": "C", "x":  0.000, "y":  0.000, "z":  0.000},
+      {"element": "C", "x":  1.300, "y":  0.000, "z":  0.000},
+      {"element": "C", "x":  2.600, "y":  0.000, "z":  0.000},
+      {"element": "H", "x": -1.300, "y":  0.000, "z":  1.090},
+      {"element": "H", "x": -1.300, "y":  1.090, "z": -0.360},
+      {"element": "H", "x":  0.000, "y": -1.090, "z":  0.360},
+      {"element": "H", "x":  1.300, "y":  1.090, "z": -0.360},
+      {"element": "H", "x":  2.600, "y":  0.000, "z":  1.090},
+      {"element": "H", "x":  2.600, "y": -1.090, "z": -0.360}
+    ],
+    "bonds": [
+      {"atom1": 0, "atom2": 1, "bond_order": 2.0},
+      {"atom1": 1, "atom2": 2, "bond_order": 1.0},
+      {"atom1": 2, "atom2": 3, "bond_order": 2.0},
+      {"atom1": 0, "atom2": 4, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 5, "bond_order": 1.0},
+      {"atom1": 1, "atom2": 6, "bond_order": 1.0},
+      {"atom1": 2, "atom2": 7, "bond_order": 1.0},
+      {"atom1": 3, "atom2": 8, "bond_order": 1.0},
+      {"atom1": 3, "atom2": 9, "bond_order": 1.0}
+    ]
+  },
+  "product": {
+    "atoms": [
+      {"element": "C", "x": -1.100, "y":  0.600, "z":  0.000},
+      {"element": "C", "x":  0.000, "y": -0.200, "z":  0.000},
+      {"element": "C", "x":  1.100, "y":  0.600, "z":  0.000},
+      {"element": "C", "x":  0.000, "y":  1.700, "z":  0.000},
+      {"element": "H", "x": -1.100, "y":  0.600, "z":  1.090},
+      {"element": "H", "x": -2.100, "y":  0.900, "z": -0.360},
+      {"element": "H", "x":  0.000, "y": -1.300, "z":  0.360},
+      {"element": "H", "x":  2.100, "y":  0.900, "z": -0.360},
+      {"element": "H", "x":  1.100, "y":  0.600, "z":  1.090},
+      {"element": "H", "x":  0.000, "y":  2.400, "z":  1.090}
+    ],
+    "bonds": [
+      {"atom1": 0, "atom2": 1, "bond_order": 1.0},
+      {"atom1": 1, "atom2": 2, "bond_order": 1.0},
+      {"atom1": 2, "atom2": 3, "bond_order": 1.0},
+      {"atom1": 3, "atom2": 0, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 4, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 5, "bond_order": 1.0},
+      {"atom1": 1, "atom2": 6, "bond_order": 1.0},
+      {"atom1": 2, "atom2": 7, "bond_order": 1.0},
+      {"atom1": 2, "atom2": 8, "bond_order": 1.0},
+      {"atom1": 3, "atom2": 9, "bond_order": 1.0}
+    ]
+  }
+}

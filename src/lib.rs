@@ -12,13 +12,13 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use types::{Molecule, CalculationOutput, EigenResult, Algorithm, auto_select_algorithm, total_ehmo_basis_size};
-use huckel::{build_hamiltonian, build_overlap_matrix, build_ehmo_hamiltonian, build_ehmo_overlap, compute_electron_density};
+use types::{Molecule, CalculationOutput, EigenResult, Algorithm, auto_select_algorithm, total_ehmo_basis_size, ReactionPathResult, IntermediateState};
+use huckel::{build_hamiltonian, build_overlap_matrix, build_ehmo_hamiltonian, build_ehmo_overlap, compute_electron_density, interpolate_molecules, compute_reaction_path_grid};
 use eigen_cpu::{solve_eigen_jacobi, solve_generalized_eigen};
 use eigen_gpu::GPUEigenSolver;
 use svg_gen::generate_energy_level_svg;
-use output::{write_density_binary, density_to_base64, molecule_to_json};
-use html_template::get_html_template;
+use output::{write_density_binary, density_to_base64, molecule_to_json, reaction_path_to_json, reaction_path_energies_json};
+use html_template::{get_html_template, get_reaction_path_html};
 
 #[pyclass]
 pub struct HuckelEngine {
@@ -180,6 +180,176 @@ impl HuckelEngine {
 
         self.finalize_calculation(py, &mol, result, algorithm,
             n, num_electrons, grid_resolution, grid_padding, output_dir)
+    }
+
+    #[pyo3(signature = (reaction_json, output_dir=None, num_steps=20, grid_resolution=40, grid_padding=3.0))]
+    fn calculate_reaction_path<'py>(
+        &mut self,
+        py: Python<'py>,
+        reaction_json: &str,
+        output_dir: Option<&str>,
+        num_steps: usize,
+        grid_resolution: usize,
+        grid_padding: f64,
+    ) -> PyResult<PyObject> {
+        println!("╔══════════════════════════════════════════════╗");
+        println!("║   Reaction Path IRC Simulation               ║");
+        println!("╚══════════════════════════════════════════════╝");
+
+        let input: crate::types::ReactionInput = serde_json::from_str(reaction_json)
+            .map_err(|e| PyRuntimeError::new_err(format!("Parse reaction JSON failed: {}", e)))?;
+
+        let reactant = &input.reactant;
+        let product = &input.product;
+        let steps = input.num_steps.unwrap_or(num_steps);
+
+        let algorithm = self.force_algorithm.unwrap_or_else(|| {
+            if crate::types::contains_heavy_metal(reactant) || crate::types::contains_heavy_metal(product) {
+                Algorithm::ExtendedHuckel
+            } else {
+                Algorithm::SimpleHuckel
+            }
+        });
+
+        let algo_str = match algorithm {
+            Algorithm::SimpleHuckel => "Simple Hückel",
+            Algorithm::ExtendedHuckel => "Extended Hückel (EHMO)",
+        };
+        println!("  Algorithm:    {}", algo_str);
+        println!("  Steps:        {}", steps);
+        println!("  Reactant:     {} atoms", reactant.atoms.len());
+        println!("  Product:      {} atoms", product.atoms.len());
+
+        let _ = self.initialize_gpu(py);
+
+        println!("\n[Step 1] Generating IRC intermediate geometries...");
+        let t0 = Instant::now();
+        let intermediates = interpolate_molecules(reactant, product, steps);
+        println!("  Generated {} intermediate states", intermediates.len());
+        println!("  Completed in {:.2?}", t0.elapsed());
+
+        println!("\n[Step 2] Computing reaction path grid...");
+        let (grid_origin, grid_dims, grid_spacing) = compute_reaction_path_grid(
+            &intermediates, grid_padding, grid_resolution
+        );
+        let total_voxels = grid_dims[0] * grid_dims[1] * grid_dims[2];
+        println!("  Grid: {}x{}x{} = {} voxels", grid_dims[0], grid_dims[1], grid_dims[2], total_voxels);
+
+        let num_electrons = match algorithm {
+            Algorithm::SimpleHuckel => reactant.num_pi_electrons(),
+            Algorithm::ExtendedHuckel => reactant.total_valence_electrons(),
+        };
+
+        println!("\n[Step 3] Computing eigenvalues for {} intermediates...", intermediates.len());
+        let t1 = Instant::now();
+
+        let mut intermediate_states = Vec::with_capacity(intermediates.len());
+
+        for (step_idx, mol) in intermediates.iter().enumerate() {
+            let t_val = step_idx as f64 / (intermediates.len() - 1).max(1) as f64;
+
+            let (h, s) = match algorithm {
+                Algorithm::SimpleHuckel => {
+                    let hh = build_hamiltonian(mol);
+                    let ss = build_overlap_matrix(mol);
+                    (hh, ss)
+                }
+                Algorithm::ExtendedHuckel => {
+                    let hh = build_ehmo_hamiltonian(mol);
+                    let ss = build_ehmo_overlap(mol);
+                    (hh, ss)
+                }
+            };
+
+            let result: EigenResult = match algorithm {
+                Algorithm::SimpleHuckel => solve_eigen_jacobi(&h, 1000, 1e-10),
+                Algorithm::ExtendedHuckel => solve_generalized_eigen(&h, &s, 2000, 1e-10),
+            };
+
+            let homo_idx = if num_electrons > 0 { (num_electrons - 1) / 2 } else { 0 };
+            let lumo_idx = homo_idx + 1;
+            let gap = if lumo_idx < result.eigenvalues.len() && homo_idx < result.eigenvalues.len() {
+                result.eigenvalues[lumo_idx] - result.eigenvalues[homo_idx]
+            } else { 0.0 };
+
+            let total_energy: f64 = result.eigenvalues.iter().take((num_electrons + 1) / 2).map(|e| 2.0 * e).sum();
+
+            let density = py.allow_threads(|| compute_electron_density(
+                mol, &result.eigenvectors, num_electrons,
+                grid_origin, grid_dims, grid_spacing, algorithm,
+            ));
+
+            intermediate_states.push(IntermediateState {
+                step: step_idx,
+                t: t_val,
+                molecule: mol.clone(),
+                eigenvalues: result.eigenvalues,
+                total_energy,
+                homo_lumo_gap: gap,
+                density,
+            });
+
+            if (step_idx + 1) % 5 == 0 || step_idx + 1 == intermediates.len() {
+                println!("  [IRC] {}/{} steps computed", step_idx + 1, intermediates.len());
+            }
+        }
+        println!("  Eigenvalue computation done in {:.2?}", t1.elapsed());
+
+        let algo_name = match algorithm {
+            Algorithm::SimpleHuckel => "SimpleHuckel",
+            Algorithm::ExtendedHuckel => "ExtendedHuckel",
+        }.to_string();
+
+        let rp_result = ReactionPathResult {
+            steps: intermediate_states,
+            grid_dims,
+            grid_origin,
+            grid_spacing,
+            num_electrons,
+            algorithm: algo_name,
+            reactant_name: reactant.atoms.iter().map(|a| a.element.clone()).collect::<Vec<_>>().join("-"),
+            product_name: product.atoms.iter().map(|a| a.element.clone()).collect::<Vec<_>>().join("-"),
+        };
+
+        if let Some(dir) = output_dir {
+            println!("\n[Step 4] Generating output files...");
+            let t3 = Instant::now();
+            let path = Path::new(dir);
+            fs::create_dir_all(path).ok();
+
+            let rp_json = reaction_path_to_json(&rp_result);
+            let json_path = path.join("reaction_path.json");
+            fs::write(&json_path, &rp_json).ok();
+            println!("  [OK] Reaction path JSON: {}", json_path.display());
+
+            let energies_json = reaction_path_energies_json(&rp_result);
+            let energies_path = path.join("energy_evolution.json");
+            fs::write(&energies_path, &energies_json).ok();
+            println!("  [OK] Energy evolution JSON: {}", energies_path.display());
+
+            let html = get_reaction_path_html(&rp_json);
+            let html_path = path.join("reaction_path.html");
+            fs::write(&html_path, html).ok();
+            println!("  [OK] Animated HTML visualization: {}", html_path.display());
+
+            println!("  Completed in {:.2?}", t3.elapsed());
+        }
+
+        println!("\n╔══════════════════════════════════════════════╗");
+        println!("║     Reaction Path Simulation Complete!       ║");
+        println!("╚══════════════════════════════════════════════╝");
+
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("num_steps", rp_result.steps.len())?;
+            dict.set_item("algorithm", rp_result.algorithm.clone())?;
+            dict.set_item("num_electrons", rp_result.num_electrons)?;
+            let energies: Vec<f64> = rp_result.steps.iter().map(|s| s.total_energy).collect();
+            let gaps: Vec<f64> = rp_result.steps.iter().map(|s| s.homo_lumo_gap).collect();
+            dict.set_item("total_energies", energies)?;
+            dict.set_item("homo_lumo_gaps", gaps)?;
+            Ok(dict.to_object(py))
+        })
     }
 
     fn __repr__(&self) -> PyResult<String> {
@@ -357,11 +527,29 @@ fn detect_algorithm(mol_json: &str) -> PyResult<String> {
     })
 }
 
+#[pyfunction]
+#[pyo3(signature = (reaction_json, output_dir, num_steps=20, use_gpu=true, grid_resolution=40, grid_padding=3.0, force_algorithm=None))]
+fn run_reaction_path(
+    reaction_json: &str,
+    output_dir: &str,
+    num_steps: usize,
+    use_gpu: bool,
+    grid_resolution: usize,
+    grid_padding: f64,
+    force_algorithm: Option<&str>,
+) -> PyResult<PyObject> {
+    Python::with_gil(|py| {
+        let mut engine = HuckelEngine::new(use_gpu, force_algorithm);
+        engine.calculate_reaction_path(py, reaction_json, Some(output_dir), num_steps, grid_resolution, grid_padding)
+    })
+}
+
 #[pymodule]
 fn huckel_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<HuckelEngine>()?;
     m.add_function(wrap_pyfunction!(load_molecule_json, m)?)?;
     m.add_function(wrap_pyfunction!(run_calculation, m)?)?;
     m.add_function(wrap_pyfunction!(detect_algorithm, m)?)?;
+    m.add_function(wrap_pyfunction!(run_reaction_path, m)?)?;
     Ok(())
 }

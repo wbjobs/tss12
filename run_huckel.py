@@ -247,6 +247,104 @@ def generate_graphene(nx: int, ny: int, project_root: Path) -> Path:
     return result_file
 
 
+def run_reaction_path_mode(args, module, project_root):
+    """反应路径模拟模式"""
+    reaction_path = Path(args.reaction)
+    if not reaction_path.is_absolute():
+        reaction_path = (project_root / reaction_path).resolve()
+
+    if not reaction_path.exists():
+        print(f"[Error] Reaction JSON not found: {reaction_path}")
+        sys.exit(1)
+
+    print(f"\n[Input] Reaction file: {reaction_path}")
+
+    try:
+        with open(reaction_path, "r", encoding="utf-8") as f:
+            reaction_data = json.load(f)
+    except Exception as e:
+        print(f"[Error] Cannot parse reaction JSON: {e}")
+        sys.exit(1)
+
+    reactant = reaction_data.get("reactant", {})
+    product = reaction_data.get("product", {})
+
+    r_atoms = reactant.get("atoms", [])
+    p_atoms = product.get("atoms", [])
+    print(f"  Reactant: {len(r_atoms)} atoms ({', '.join(set(a['element'] for a in r_atoms))})")
+    print(f"  Product:  {len(p_atoms)} atoms ({', '.join(set(a['element'] for a in p_atoms))})")
+    print(f"  Steps:    {args.num_steps}")
+
+    all_atoms = r_atoms + p_atoms
+    _, reason, heavy = detect_algorithm({"atoms": all_atoms}, args.force_algorithm)
+    print(f"  Algorithm: {reason}")
+    if heavy:
+        print(f"  Heavy metals: {', '.join(f'{e}(Z={z})' for e,z in heavy)}")
+
+    output_dir = Path(args.output) if args.output else project_root / "results" / reaction_path.stem
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[Output] Results directory: {output_dir}")
+    print(f"[Params] GPU: {not args.no_gpu}, Grid res: {args.grid_res}, Steps: {args.num_steps}")
+
+    t0 = time.time()
+    try:
+        reaction_json_text = json.dumps(reaction_data)
+        engine_force = None
+        if args.force_algorithm == "ehmo":
+            engine_force = "ehmo"
+        elif args.force_algorithm == "simple":
+            engine_force = "simple"
+
+        engine = module.HuckelEngine(use_gpu=not args.no_gpu, force_algorithm=engine_force)
+        result = engine.calculate_reaction_path(
+            reaction_json_text,
+            str(output_dir),
+            num_steps=args.num_steps,
+            grid_resolution=args.grid_res,
+            grid_padding=args.grid_padding
+        )
+    except Exception as e:
+        print(f"\n[Error] Reaction path simulation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+    elapsed = time.time() - t0
+    print(f"\n[Done] Total elapsed: {elapsed:.2f} seconds")
+
+    html_path = output_dir / "reaction_path.html"
+    json_path = output_dir / "reaction_path.json"
+    for f in [json_path, html_path]:
+        if f.exists():
+            size_kb = f.stat().st_size / 1024
+            print(f"  [OK] {f.relative_to(project_root)}  ({size_kb:.1f} KB)")
+
+    if result:
+        energies = result.get("total_energies", [])
+        gaps = result.get("homo_lumo_gaps", [])
+        if energies:
+            min_e = min(energies)
+            max_e = max(energies)
+            barrier = max_e - min_e
+            print(f"\n  Energy profile:")
+            print(f"    Min energy:     {min_e:.4f} eV")
+            print(f"    Max energy:     {max_e:.4f} eV")
+            print(f"    Barrier:        {barrier:.4f} eV")
+        if gaps:
+            print(f"    Gap range:      {min(gaps):.4f} - {max(gaps):.4f} eV")
+
+    if html_path.exists() and not args.no_open:
+        print(f"\n[Launch] Opening reaction path animation...")
+        try:
+            webbrowser.open("file://" + str(html_path))
+        except Exception:
+            pass
+
+    print("\n" + "=" * 64)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Hückel Molecular Orbital Calculator (Rust+Python+GPU)",
@@ -289,6 +387,14 @@ def main():
         "--force-algorithm", choices=["auto", "simple", "ehmo"], default="auto",
         help="Force algorithm: 'auto' (detect automatically, default), 'simple' (pi-only), 'ehmo' (full valence + d-orbitals for metals)"
     )
+    parser.add_argument(
+        "--reaction", metavar="REACTION_JSON", default=None,
+        help="Run reaction path simulation with a reaction JSON (reactant + product)"
+    )
+    parser.add_argument(
+        "--num-steps", type=int, default=20,
+        help="Number of IRC interpolation steps (default: 20, for --reaction mode)"
+    )
 
     args = parser.parse_args()
     project_root = Path(__file__).parent.resolve()
@@ -320,6 +426,10 @@ def main():
     if module is None:
         print("[Error] Failed to load extension after build.")
         sys.exit(1)
+
+    if args.reaction:
+        run_reaction_path_mode(args, module, project_root)
+        return
 
     mol_path = None
     if args.generate_graphene:

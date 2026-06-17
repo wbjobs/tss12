@@ -1,0 +1,34 @@
+{
+  "reactant": {
+    "atoms": [
+      {"element": "C",  "x":  0.000, "y":  0.000, "z":  0.000},
+      {"element": "H",  "x":  0.000, "y":  1.090, "z":  0.000},
+      {"element": "H",  "x":  1.030, "y": -0.360, "z":  0.000},
+      {"element": "H",  "x": -0.510, "y": -0.360, "z":  0.890},
+      {"element": "Cl", "x": -0.510, "y": -0.360, "z": -2.300},
+      {"element": "F",  "x":  3.000, "y":  0.000, "z":  0.000}
+    ],
+    "bonds": [
+      {"atom1": 0, "atom2": 1, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 2, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 3, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 4, "bond_order": 1.0}
+    ]
+  },
+  "product": {
+    "atoms": [
+      {"element": "C",  "x":  0.000, "y":  0.000, "z":  0.000},
+      {"element": "H",  "x":  0.000, "y":  1.090, "z":  0.000},
+      {"element": "H",  "x":  1.030, "y": -0.360, "z":  0.000},
+      {"element": "H",  "x": -0.510, "y": -0.360, "z":  0.890},
+      {"element": "Cl", "x": -3.000, "y":  0.000, "z":  0.000},
+      {"element": "F",  "x":  0.510, "y": -0.360, "z": -2.300}
+    ],
+    "bonds": [
+      {"atom1": 0, "atom2": 1, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 2, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 3, "bond_order": 1.0},
+      {"atom1": 0, "atom2": 5, "bond_order": 1.0}
+    ]
+  }
+}

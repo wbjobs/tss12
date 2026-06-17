@@ -1,4 +1,4 @@
-use crate::types::{CalculationOutput, Molecule};
+use crate::types::{CalculationOutput, Molecule, ReactionPathResult};
 use std::fs::File;
 use std::io::{Result, Write};
 use byteorder::{LittleEndian, WriteBytesExt};
@@ -77,4 +77,63 @@ pub fn molecule_to_json(mol: &Molecule, output: &CalculationOutput) -> String {
         output.num_electrons,
         output.homo_lumo_gap
     )
+}
+
+pub fn reaction_path_to_json(rp: &ReactionPathResult) -> String {
+    let steps_json: Vec<String> = rp.steps.iter().map(|s| {
+        let atoms_json: Vec<String> = s.molecule.atoms.iter().map(|a| {
+            format!(
+                r#"{{"element":"{}","x":{:.6},"y":{:.6},"z":{:.6},"radius":{:.3}}}"#,
+                a.element, a.x, a.y, a.z,
+                Molecule::atom_radius(&a.element)
+            )
+        }).collect();
+
+        let bonds_json: Vec<String> = s.molecule.bonds.iter().map(|b| {
+            format!(r#"{{"atom1":{},"atom2":{},"bond_order":{:.2}}}"#, b.atom1, b.atom2, b.bond_order)
+        }).collect();
+
+        let ev_str: Vec<String> = s.eigenvalues.iter().map(|e| format!("{:.6}", e)).collect();
+
+        let density_b64 = {
+            let mut buf = Vec::new();
+            for &d in &s.density {
+                let _ = buf.write_f32::<LittleEndian>(d);
+            }
+            base64::engine::general_purpose::STANDARD.encode(&buf)
+        };
+
+        format!(
+            r#"{{"step":{},"t":{:.4},"atoms":[{}],"bonds":[{}],"eigenvalues":[{}],"total_energy":{:.6},"homo_lumo_gap":{:.6},"density_b64":"{}"}}"#,
+            s.step, s.t,
+            atoms_json.join(","),
+            bonds_json.join(","),
+            ev_str.join(","),
+            s.total_energy, s.homo_lumo_gap,
+            density_b64
+        )
+    }).collect();
+
+    format!(
+        r#"{{"num_steps":{},"grid_dims":[{},{},{}],"origin":[{:.4},{:.4},{:.4}],"spacing":{:.4},"num_electrons":{},"algorithm":"{}","reactant":"{}","product":"{}","steps":[{}]}}"#,
+        rp.steps.len(),
+        rp.grid_dims[0], rp.grid_dims[1], rp.grid_dims[2],
+        rp.grid_origin[0], rp.grid_origin[1], rp.grid_origin[2],
+        rp.grid_spacing,
+        rp.num_electrons,
+        rp.algorithm,
+        rp.reactant_name,
+        rp.product_name,
+        steps_json.join(",")
+    )
+}
+
+pub fn reaction_path_energies_json(rp: &ReactionPathResult) -> String {
+    let entries: Vec<String> = rp.steps.iter().map(|s| {
+        format!(r#"{{"step":{},"t":{:.4},"total_energy":{:.6},"homo_lumo_gap":{:.6},"eigenvalues":[{}]}}"#,
+            s.step, s.t, s.total_energy, s.homo_lumo_gap,
+            s.eigenvalues.iter().map(|e| format!("{:.6}", e)).collect::<Vec<_>>().join(",")
+        )
+    }).collect();
+    format!(r#"[{}]"#, entries.join(","))
 }

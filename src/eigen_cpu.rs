@@ -49,7 +49,7 @@ fn ensure_square(matrix: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
     m
 }
 
-fn sanitize_matrix(matrix: &mut Vec<Vec<f64>>) {
+pub fn sanitize_matrix(matrix: &mut Vec<Vec<f64>>) {
     let n = matrix.len();
     for i in 0..n {
         for j in 0..n {

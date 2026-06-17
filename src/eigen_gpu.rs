@@ -367,4 +367,34 @@ impl GPUEigenSolver {
 
         Ok((ev, ritz))
     }
+
+    pub fn batch_solve_eigen(
+        &self,
+        matrices: &Vec<Vec<Vec<f64>>>,
+        overlaps: &Vec<Option<Vec<Vec<f64>>>>,
+        use_gpu: bool,
+    ) -> Vec<EigenResult> {
+        let n_items = matrices.len();
+        println!("[Batch] Computing {} eigenvalue problems", n_items);
+
+        let mut results = Vec::with_capacity(n_items);
+        for (idx, matrix) in matrices.iter().enumerate() {
+            let n = matrix.len();
+            let result = if let Some(ref s) = overlaps.get(idx).and_then(|o| o.as_ref()) {
+                solve_generalized_eigen(matrix, s, 2000, 1e-10)
+            } else if use_gpu && n > 250 {
+                match pollster::block_on(self.solve_eigen_gpu(matrix, n, n.min(80))) {
+                    Ok(r) => r,
+                    Err(_) => solve_eigen_jacobi(matrix, 1000, 1e-10),
+                }
+            } else {
+                solve_eigen_jacobi(matrix, 1000, 1e-10)
+            };
+            results.push(result);
+            if (idx + 1) % 5 == 0 || idx + 1 == n_items {
+                println!("  [Batch] {}/{} steps completed", idx + 1, n_items);
+            }
+        }
+        results
+    }
 }

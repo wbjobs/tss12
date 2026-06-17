@@ -1,4 +1,4 @@
-use crate::types::{Atom, Bond, Molecule, Algorithm, get_ehmo_params, total_ehmo_basis_size, atom_orbital_offset, num_valence_orbitals, is_heavy_metal};
+use crate::types::{Atom, Bond, Molecule, Algorithm, get_ehmo_params, total_ehmo_basis_size, atom_orbital_offset, num_valence_orbitals};
 
 const ALPHA_C: f64 = -11.2;
 const ALPHA_N: f64 = -13.9;
@@ -556,4 +556,141 @@ fn gaussian(x: f64, y: f64, z: f64, cx: f64, cy: f64, cz: f64, sigma: f64) -> f6
     let pi_sq = std::f64::consts::PI.powi(3);
     let norm = 1.0 / (pi_sq * sigma.powi(6)).sqrt();
     norm * (-r2 / (sigma * sigma)).exp()
+}
+
+pub fn interpolate_molecules(reactant: &Molecule, product: &Molecule, num_steps: usize) -> Vec<Molecule> {
+    let n_r = reactant.atoms.len();
+    let n_p = product.atoms.len();
+    let n = n_r.min(n_p);
+    if n == 0 { return vec![]; }
+    let steps = if num_steps < 2 { 2 } else { num_steps };
+
+    let mapping = match_atoms(reactant, product);
+
+    let mut result = Vec::with_capacity(steps);
+    for step in 0..steps {
+        let t = step as f64 / (steps - 1) as f64;
+        let mut atoms = Vec::with_capacity(n);
+        for i in 0..n {
+            let j = mapping[i];
+            let a_r = &reactant.atoms[i];
+            let a_p = if j < product.atoms.len() { &product.atoms[j] } else { a_r };
+            atoms.push(Atom {
+                element: a_r.element.clone(),
+                x: a_r.x * (1.0 - t) + a_p.x * t,
+                y: a_r.y * (1.0 - t) + a_p.y * t,
+                z: a_r.z * (1.0 - t) + a_p.z * t,
+            });
+        }
+
+        let mut bonds = Vec::new();
+        let bond_set_r: std::collections::HashSet<(usize, usize)> = reactant.bonds.iter()
+            .map(|b| if b.atom1 < b.atom2 { (b.atom1, b.atom2) } else { (b.atom2, b.atom1) })
+            .collect();
+        let bond_set_p: std::collections::HashSet<(usize, usize)> = product.bonds.iter()
+            .map(|b| if b.atom1 < b.atom2 { (b.atom1, b.atom2) } else { (b.atom2, b.atom1) })
+            .collect();
+
+        for &(i2, j2) in &bond_set_r {
+            if i2 < n && j2 < n {
+                let in_p = bond_set_p.contains(&(i2, j2));
+                let bo = if in_p { 1.0 } else { (1.0 - t).max(0.0) };
+                if bo > 0.05 {
+                    bonds.push(Bond { atom1: i2, atom2: j2, bond_order: bo });
+                }
+            }
+        }
+        for &(i2, j2) in &bond_set_p {
+            if i2 < n && j2 < n && !bond_set_r.contains(&(i2, j2)) {
+                let bo = t;
+                if bo > 0.05 {
+                    bonds.push(Bond { atom1: i2, atom2: j2, bond_order: bo });
+                }
+            }
+        }
+
+        result.push(Molecule {
+            atoms,
+            bonds,
+            charge: reactant.charge,
+            multiplicity: reactant.multiplicity,
+        });
+    }
+    result
+}
+
+fn match_atoms(reactant: &Molecule, product: &Molecule) -> Vec<usize> {
+    let n_r = reactant.atoms.len();
+    let n_p = product.atoms.len();
+    let n = n_r.min(n_p);
+
+    let mut mapping = vec![0usize; n_r];
+    let mut used = vec![false; n_p];
+
+    for i in 0..n_r {
+        let ri = &reactant.atoms[i];
+        let mut best_j = i.min(n_p - 1);
+        let mut best_dist = f64::INFINITY;
+
+        for j in 0..n_p {
+            if used[j] { continue; }
+            if ri.element != product.atoms[j].element { continue; }
+            let dx = ri.x - product.atoms[j].x;
+            let dy = ri.y - product.atoms[j].y;
+            let dz = ri.z - product.atoms[j].z;
+            let d = dx * dx + dy * dy + dz * dz;
+            if d < best_dist {
+                best_dist = d;
+                best_j = j;
+            }
+        }
+
+        if best_dist < f64::INFINITY {
+            mapping[i] = best_j;
+            used[best_j] = true;
+        } else {
+            for j in 0..n_p {
+                if !used[j] {
+                    mapping[i] = j;
+                    used[j] = true;
+                    break;
+                }
+            }
+        }
+    }
+    mapping
+}
+
+pub fn compute_reaction_path_grid(
+    molecules: &[Molecule],
+    grid_padding: f64,
+    grid_resolution: usize,
+) -> ([f64; 3], [usize; 3], f64) {
+    let mut global_min = [f64::INFINITY; 3];
+    let mut global_max = [f64::NEG_INFINITY; 3];
+    for mol in molecules {
+        let (min, max) = mol.bounding_box();
+        for k in 0..3 {
+            global_min[k] = global_min[k].min(min[k]);
+            global_max[k] = global_max[k].max(max[k]);
+        }
+    }
+    let grid_origin = [
+        global_min[0] - grid_padding,
+        global_min[1] - grid_padding,
+        global_min[2] - grid_padding,
+    ];
+    let grid_size = [
+        (global_max[0] - global_min[0]) + 2.0 * grid_padding,
+        (global_max[1] - global_min[1]) + 2.0 * grid_padding,
+        (global_max[2] - global_min[2]) + 2.0 * grid_padding,
+    ];
+    let max_size = grid_size[0].max(grid_size[1]).max(grid_size[2]);
+    let grid_spacing = max_size / grid_resolution as f64;
+    let grid_dims = [
+        (grid_size[0] / grid_spacing).ceil() as usize + 1,
+        (grid_size[1] / grid_spacing).ceil() as usize + 1,
+        (grid_size[2] / grid_spacing).ceil() as usize + 1,
+    ];
+    (grid_origin, grid_dims, grid_spacing)
 }

@@ -266,6 +266,37 @@ impl Molecule {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionInput {
+    pub reactant: Molecule,
+    pub product: Molecule,
+    pub num_steps: Option<usize>,
+    pub interpolation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IntermediateState {
+    pub step: usize,
+    pub t: f64,
+    pub molecule: Molecule,
+    pub eigenvalues: Vec<f64>,
+    pub total_energy: f64,
+    pub homo_lumo_gap: f64,
+    pub density: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReactionPathResult {
+    pub steps: Vec<IntermediateState>,
+    pub grid_dims: [usize; 3],
+    pub grid_origin: [f64; 3],
+    pub grid_spacing: f64,
+    pub num_electrons: usize,
+    pub algorithm: String,
+    pub reactant_name: String,
+    pub product_name: String,
+}
+
 pub fn gaussian_3d(x: f64, y: f64, z: f64, cx: f64, cy: f64, cz: f64, sigma: f64) -> f64 {
     let dx = x - cx; let dy = y - cy; let dz = z - cz;
     let r2 = dx * dx + dy * dy + dz * dz;
